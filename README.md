@@ -17,4 +17,4 @@ Update webapp-template: ./update.sh <name-webapp> udagram.yml  udagram-paramete
 Delete network-template: ./delete.sh
 Delete webapp-template: ./delete.sh
 # Test
-Load Balancer URL:
+Load Balancer URL: http://projec-webap-syn4opzkkj3x-1349088147.us-east-1.elb.amazonaws.com/
