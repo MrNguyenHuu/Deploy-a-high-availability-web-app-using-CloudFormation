@@ -1,0 +1,10 @@
+[
+    {
+        "ParameterKey": "EnvironmentName",
+        "ParameterValue": "uocnh1-CloudFormation"
+    },
+    {
+        "ParameterKey": "MyIpAddress",
+        "ParameterValue": "10.38.65.153/10"
+    }
+]
