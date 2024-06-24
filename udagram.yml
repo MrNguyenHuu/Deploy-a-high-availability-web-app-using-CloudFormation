@@ -1,0 +1,271 @@
+Description: uocnh1 / Deploy a high-availability web app using CloudFormation - Udagram
+
+Parameters:
+  EnvironmentName:
+    Description: My Develop Environment
+    Type: String
+  MyIpAddress:
+    Description: My IP Address
+    Type: String
+
+Resources:
+
+  # Start a Security Group for your Bastion Host, using our jumpboxes to SSH into the WebApp.
+  BastionSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for your bastion servers, Allow SSH to our jumpboxes
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref MyIpAddress
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Bastions-Security-Group
+  # End a Security Group for your Bastion Host, using our jumpboxes to SSH into the WebApp.
+
+  # Start Security groups for your Application Load Balancer(allow all traffic inbound port 80)
+  LBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http to our load balancer
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-LBSecGroup
+  # End Security groups for your Application Load Balancer(allow all traffic inbound port 80)
+
+  # Start SecurityGroup Web App (Load Balancer using port 80, SSH using port 22 through Bastion Server)
+  WebAppSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Only allow http to our load balancer and SSH from local
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LBSecGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionSecGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-WebAppSecGroup
+  # End SecurityGroup Web App (Load Balancer using port 80, SSH using port 22 through Bastion Server)
+
+  # Start Autoscaling Group
+  AutoScalingWebAppGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PrivateSubnets"
+      LaunchTemplate:
+        Version: !GetAtt WebAppLaunchTemplate.LatestVersionNumber
+        LaunchTemplateId: !Ref WebAppLaunchTemplate
+      MaxSize: "4"
+      MinSize: "1"
+      TargetGroupARNs:
+        - Ref: TargetGroup
+  # End Autoscaling Group
+
+  # Start Launch configuration template
+  WebAppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${EnvironmentName}-web-servers"
+      LaunchTemplateData:
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            apt-get update -y
+            sudo apt-get install nginx -y
+            service nginx start
+
+            # Define the directory where the index.html will be placed
+            WEB_DIR="/var/www/html"
+
+            # Create a basic index.html file
+            cat <<EOF >index.html
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>It works! Udagram, Udacity</title>
+            </head>
+            <body>
+                <h1>It works! Udagram, Udacity</h1>
+                <p>This website is hosted on Nginx.</p>
+            </body>
+            </html>
+            EOF
+
+            # Copy index.html to the Nginx web directory
+            sudo rm -r $WEB_DIR/index.*
+            sudo cp index.html $WEB_DIR
+            sudo systemctl reload nginx
+        ImageId: ami-0e001c9271cf7f3b9
+        SecurityGroupIds:
+          - !Ref WebAppSecGroup
+        InstanceType: t2.micro
+        BlockDeviceMappings:
+        - DeviceName: "/dev/sdk"
+          Ebs:
+            VolumeSize: '10'
+        IamInstanceProfile:
+          Name: !Ref InstanceProfile
+  # End Launch configuration template
+
+  # Start Create Load Balancer, Listener, Listener Rule, TargetGroup
+ 
+  WebAppLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet2"
+        - Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet1"
+      SecurityGroups:
+        - Ref: LBSecGroup
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Conditions:
+        - Field: path-pattern
+          Values: [/]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref "TargetGroup"
+      ListenerArn: !Ref "Listener"
+      Priority: 1
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn:
+            Ref: TargetGroup
+      LoadBalancerArn:
+        Ref: WebAppLB
+      Port: "80"
+      Protocol: HTTP
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 10
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 3
+      UnhealthyThresholdCount: 6
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+
+  # End Create Load Balancer, Listener, Listener Rule, TargetGroup
+
+  # Start Create 2 Bastion corresponding to 2 Public Subnet
+  BastionServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e001c9271cf7f3b9
+      InstanceType: t2.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          GroupSet:
+            - Ref: "BastionSecGroup"
+          DeviceIndex: "0"
+          SubnetId:
+            Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet1"
+
+  BastionServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0e001c9271cf7f3b9
+      InstanceType: t2.micro
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          GroupSet:
+            - Ref: "BastionSecGroup"
+          DeviceIndex: "0"
+          SubnetId:
+            Fn::ImportValue: !Sub "${EnvironmentName}-PublicSubnet2"
+  # End Create 2 Bastion corresponding to 2 Public Subnet
+
+  # Start Connect Webapp to S3
+  # Create S3 Bucket
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "uocnh1-s3bucket"
+      VersioningConfiguration:
+        Status: Enabled
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicPolicy: true
+        BlockPublicAcls: true
+        RestrictPublicBuckets: true
+        IgnorePublicAcls: true
+
+  # End Connect Webapp to S3
+
+  # Start Set Role for InstanceProfile
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+      - !Ref IAMRole
+      Path: '/'
+  # End Set Role for InstanceProfile
+
+  # Start IAM Role for S3 Bucket
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref EnvironmentName
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: 'Allow'
+          Principal:
+            Service:
+            - 'ec2.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: s3
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Effect: Allow
+              Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+              Resource:
+                - !GetAtt S3Bucket.Arn
+  # End IAM Role for S3 Bucket
+
+Outputs:
+  WebAppLB:
+    Value:
+      Fn::Join: ["", ["http://", !GetAtt WebAppLB.DNSName]]
+    Description: Load balancer public
+    Export:
+      Name: !Sub ${EnvironmentName}-LoadBalancer-URL
